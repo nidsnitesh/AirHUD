@@ -72,6 +72,7 @@ final class AirHUDMonitor: ObservableObject {
     
     private var timer: Timer?
     private let client = CWWiFiClient.shared()
+    private var lastKnownSSID: String?
     
     // Tracks previous cellular generation exclusively for hotspot downgrade alerts
     private var previousHotspotGeneration: String?
@@ -114,7 +115,9 @@ final class AirHUDMonitor: ObservableObject {
         
         // Query cached scan results to identify the connected network
         if let cached = iface.cachedScanResults() {
-            if let matched = cached.first(where: { $0.wlanChannel?.channelNumber == channel && channel != nil }) {
+            // Find network matching channel and closest in RSSI
+            let onChannel = cached.filter { $0.wlanChannel?.channelNumber == channel && channel != nil }
+            if let matched = onChannel.min(by: { abs($0.rssiValue - rssiVal) < abs($1.rssiValue - rssiVal) }) ?? cached.first {
                 if detectedSSID == nil || detectedSSID?.isEmpty == true {
                     detectedSSID = matched.ssid
                 }
@@ -123,20 +126,51 @@ final class AirHUDMonitor: ObservableObject {
         }
         
         let connected = rssiVal != 0 && rssiVal > -100
+        
+        // Cache and persist SSID across polls so transient nil scans don't lose the network name
+        if let currentSSID = detectedSSID, !currentSSID.isEmpty, currentSSID != "Connected" {
+            self.lastKnownSSID = currentSSID
+        } else if let cachedSSID = self.lastKnownSSID {
+            detectedSSID = cachedSSID
+        }
+        
         let ssidString = detectedSSID ?? (connected ? "Connected" : "Disconnected")
         let ssidLower = ssidString.lowercased()
         
-        // Hotspot Detection
-        let hotspotDetected = connected && (
-            ssidLower.contains("iphone") ||
-            ssidLower.contains("android") ||
-            ssidLower.contains("galaxy") ||
-            ssidLower.contains("hotspot") ||
-            ssidLower.contains("pixel") ||
-            ssidLower.contains("ipad") ||
-            ssidLower.contains("cellular") ||
-            beaconInterval >= 250
-        )
+        // Comprehensive Hotspot Keywords & Detection
+        let hotspotKeywords = [
+            "iphone", "android", "galaxy", "hotspot", "pixel", "ipad", "cellular",
+            "oneplus", "xiaomi", "redmi", "poco", "oppo", "vivo", "realme",
+            "huawei", "honor", "motorola", "moto", "phone", "5g", "4g", "lte"
+        ]
+        
+        var isHotspotNetwork = hotspotKeywords.contains(where: { ssidLower.contains($0) }) || beaconInterval >= 250
+        
+        // Secondary check: examine nearby cached networks with strong signal
+        if !isHotspotNetwork, let cached = iface.cachedScanResults() {
+            for net in cached where net.rssiValue >= -65 {
+                let name = (net.ssid ?? "").lowercased()
+                if hotspotKeywords.contains(where: { name.contains($0) }) {
+                    isHotspotNetwork = true
+                    if detectedSSID == nil || detectedSSID == "Connected" {
+                        detectedSSID = net.ssid
+                        self.lastKnownSSID = net.ssid
+                    }
+                    break
+                }
+            }
+        }
+        
+        // Mode override from Menu Bar (Auto / Force Hotspot / Force Wi-Fi)
+        let modeOverride = UserDefaults.standard.string(forKey: "AirHUD_modeOverride") ?? "auto"
+        let hotspotDetected: Bool
+        if modeOverride == "forceHotspot" {
+            hotspotDetected = connected
+        } else if modeOverride == "forceWifi" {
+            hotspotDetected = false
+        } else {
+            hotspotDetected = connected && isHotspotNetwork
+        }
         
         // Infer cellular generation when connected to a Hotspot
         let gen: String
@@ -496,6 +530,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         
         menu.addItem(NSMenuItem.separator())
         
+        // Network Mode Selection Submenu
+        let modeMenu = NSMenu()
+        let currentMode = UserDefaults.standard.string(forKey: "AirHUD_modeOverride") ?? "auto"
+        
+        let autoItem = NSMenuItem(title: "Auto-Detect (Default)", action: #selector(setModeAuto), keyEquivalent: "")
+        autoItem.target = self
+        autoItem.state = (currentMode == "auto") ? .on : .off
+        modeMenu.addItem(autoItem)
+        
+        let forceHotspotItem = NSMenuItem(title: "Force Hotspot Mode (5G/4G)", action: #selector(setModeForceHotspot), keyEquivalent: "")
+        forceHotspotItem.target = self
+        forceHotspotItem.state = (currentMode == "forceHotspot") ? .on : .off
+        modeMenu.addItem(forceHotspotItem)
+        
+        let forceWifiItem = NSMenuItem(title: "Force Wi-Fi Mode", action: #selector(setModeForceWifi), keyEquivalent: "")
+        forceWifiItem.target = self
+        forceWifiItem.state = (currentMode == "forceWifi") ? .on : .off
+        modeMenu.addItem(forceWifiItem)
+        
+        let modeParentItem = NSMenuItem(title: "Network Mode", action: nil, keyEquivalent: "")
+        modeParentItem.submenu = modeMenu
+        menu.addItem(modeParentItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
         let quitItem = NSMenuItem(
             title: "Quit AirHUD",
             action: #selector(NSApplication.terminate(_:)),
@@ -504,6 +563,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
         
         statusItem.menu = menu
+    }
+    
+    @objc private func setModeAuto() {
+        UserDefaults.standard.set("auto", forKey: "AirHUD_modeOverride")
+        monitor.poll()
+        setupStatusBar()
+    }
+    
+    @objc private func setModeForceHotspot() {
+        UserDefaults.standard.set("forceHotspot", forKey: "AirHUD_modeOverride")
+        monitor.poll()
+        setupStatusBar()
+    }
+    
+    @objc private func setModeForceWifi() {
+        UserDefaults.standard.set("forceWifi", forKey: "AirHUD_modeOverride")
+        monitor.poll()
+        setupStatusBar()
     }
     
     @objc private func toggleHUDVisibility() {
