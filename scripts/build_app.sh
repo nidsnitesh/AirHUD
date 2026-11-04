@@ -15,8 +15,9 @@ rm -rf "$BUNDLE_DIR" "$APP_NAME.zip"
 mkdir -p "$MACOS_DIR"
 mkdir -p "$RESOURCES_DIR"
 
-# Copy binary
-cp .build/release/AirHUD "$MACOS_DIR/$APP_NAME"
+# Copy binary from SPM release bin path
+BIN_DIR="$(swift build -c release --show-bin-path)"
+cp "$BIN_DIR/$APP_NAME" "$MACOS_DIR/$APP_NAME"
 chmod +x "$MACOS_DIR/$APP_NAME"
 
 # Create Info.plist
