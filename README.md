@@ -20,27 +20,30 @@
 
 ## 🌟 Overview
 
-**AirHUD** is an open-source, unobtrusive macOS menu bar accessory and floating overlay widget built with **Swift**, **SwiftUI**, **AppKit**, and **CoreWLAN**.
+**AirHUD** is an open-source, unobtrusive macOS menu bar accessory and floating overlay widget built with **Swift**, **SwiftUI**, **AppKit**, **CoreWLAN**, and **Sharing (Instant Hotspot)**.
 
-Designed for remote engineers, digital nomads, and presentation power users, AirHUD gives you instantaneous, glanceable insight into your network health. It detects whether you are on high-speed **5G/4G iPhone or Android Personal Hotspots** versus standard office/home Wi-Fi, showing real-time cellular tower bars and exact dBm signal metrics without opening menus or taking your eyes off full-screen apps.
+Designed for remote engineers, digital nomads, and power users, AirHUD gives you instantaneous, glanceable insight into your network health. It autonomously detects whether you are on high-speed **5G / 4G Personal Hotspots** versus standard office/home Wi-Fi, showing real-time cellular tower bars, phone battery life, and exact dBm signal metrics without opening menus or taking your eyes off full-screen apps.
 
 ---
 
 ## ✨ Features
 
-- 🪄 **Dynamic Network Intelligence**:
-  - Automatically identifies whether you are connected to a **Personal Hotspot** (via 300 TU beacon interval telemetry and SSID signatures) or **Standard Wi-Fi**.
-  - Intelligently infers cellular generation:
-    - **5G**: Solid vibrant green background (`#29C757`) with crisp white text.
-    - **4G**: Solid alert red background (`#EB3840`) with crisp white text.
+- 🪄 **100% Autonomous Network & Cellular Intelligence**:
+  - **Direct macOS Control Center Integration**: Integrates directly with Apple's `SFRemoteHotspotSession` service (the exact same system API used by macOS Control Center and the Wi-Fi menu) to read real-time cellular telemetry:
+    - **5G**: Solid vibrant green badge (`#29C757`) with crisp white text.
+    - **4G**: Solid alert red badge (`#EB3840`) with crisp white text.
+  - **Background Speed & Latency Polling**: Background TCP round-trip latency probing (< 50ms = 5G, ≥ 50ms = 4G) serves as an autonomous fallback for Android and generic mobile hotspots.
+  - **Standard Wi-Fi Mode**: Automatically shifts to a clean mint Wi-Fi badge when connected to traditional routers.
+- 🔋 **Live Phone Battery Telemetry**:
+  - Automatically reads your connected iPhone's live battery percentage and displays it smoothly on hover (`75% 🔋 • -51 dBm`).
 - 🔔 **5G → 4G Cellular Downgrade Alert**:
   - Exclusively for Personal Hotspots: sends a macOS system alert notification (with "Ping" audio feedback) when your connection drops from 5G to 4G LTE, keeping you aware of network throttling or cellular coverage drops.
 - 📶 **Cellular Tower Bars Next to 5G / 4G**:
   - In Personal Hotspot mode, cellular tower signal bars (4 ascending bars) are displayed directly beside the `5G` / `4G` badge, showing live tower reception.
-  - In standard Wi-Fi mode, the Wi-Fi icon and mint badge are displayed, with Wi-Fi signal metrics revealing on hover.
+  - In standard Wi-Fi mode, Wi-Fi signal metrics and bars reveal on hover.
 - 📐 **Ultra-Compact Idle & Smooth Expansion on Hover**:
   - **Ultra-Compact Idle State**: Shows exclusively the **`5G`** (or `4G` / `Wi-Fi`) badge pill with zero visual clutter.
-  - **Hover State (`.onHover`)**: Expands horizontally with a fluid spring animation inside a stationary canvas to reveal the connection icon, cellular tower bars, signal strength (dBm), and a quick-close button.
+  - **Hover State (`.onHover`)**: Expands horizontally with a fluid spring animation inside a stationary 290pt canvas to reveal the connection icon, cellular tower bars, phone battery, signal strength (dBm), and a quick-close button.
 - 🧲 **Magnetic Edge & Corner Snapping**:
   - Freely draggable anywhere across your monitors (`overlayPanel.isMovableByWindowBackground = true`).
   - Drop the HUD within 35pt of any screen edge or corner to dock it flush with a comfortable 16pt margin via smooth `0.15s` ease-out spring physics.
@@ -60,7 +63,7 @@ Designed for remote engineers, digital nomads, and presentation power users, Air
 
 | Personal Hotspot (5G Active) | Personal Hotspot (4G Active) | Standard Wi-Fi (Home / Office) |
 | :---: | :---: | :---: |
-| Blue Hotspot icon • 🟢 **5G** (Solid Green, White text) • 4 green tower bars • `-52 dBm` | Blue Hotspot icon • 🔴 **4G** (Solid Red, White text) • Red tower bars • `-74 dBm` | Green Wi-Fi icon • 🟩 **Wi-Fi** Mint badge • Wi-Fi bars & `-50 dBm` |
+| Blue Hotspot icon • 🟢 **5G** (Solid Green, White text) • 4 green tower bars • `75% 🔋 • -51 dBm` | Blue Hotspot icon • 🔴 **4G** (Solid Red, White text) • Red tower bars • `50% 🔋 • -74 dBm` | Green Wi-Fi icon • 🟩 **Wi-Fi** Mint badge • Wi-Fi bars & `-50 dBm` |
 
 ---
 
