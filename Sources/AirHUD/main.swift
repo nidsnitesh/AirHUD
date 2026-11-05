@@ -555,6 +555,7 @@ struct AirHUDView: View {
                     Text(monitor.isConnected ? (monitor.isHotspot ? (monitor.batteryLife > 0 ? "\(monitor.batteryLife)% 🔋 • \(monitor.rssi) dBm" : (monitor.latencyMs > 0 ? "\(Int(monitor.latencyMs))ms • \(monitor.rssi) dBm" : "\(monitor.rssi) dBm")) : "\(monitor.rssi) dBm") : "-- dBm")
                         .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
                         .foregroundColor(monitor.isConnected ? Color.white.opacity(0.92) : Color.white.opacity(0.45))
+                        .lineLimit(1)
                         .fixedSize()
                         .layoutPriority(1)
                         .transition(.opacity)
@@ -628,7 +629,7 @@ struct AirHUDView: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
-        .frame(width: 220, height: 48)
+        .frame(width: 290, height: 48)
     }
 }
 
@@ -641,8 +642,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var visibilityToggleMenuItem: NSMenuItem?
     private let monitor = AirHUDMonitor()
     
-    // Fixed window frame size
-    private let windowWidth: CGFloat = 220
+    // Fixed window frame size (290 gives full clearance for icon, badge, bars, battery, dBm, and close button)
+    private let windowWidth: CGFloat = 290
     private let windowHeight: CGFloat = 48
     
     // Geometry metrics
