@@ -61,6 +61,87 @@ final class SnappingPanel: NSPanel {
     }
 }
 
+// MARK: - Apple Instant Hotspot Device Model
+struct AppleHotspotInfo {
+    let name: String
+    let generation: String
+    let signalStrength: Int
+    let batteryLife: Int
+}
+
+// MARK: - Apple Instant Hotspot Manager (Same API as macOS Control Center)
+final class AppleInstantHotspotManager: NSObject {
+    static let shared = AppleInstantHotspotManager()
+    
+    private var session: AnyObject?
+    private(set) var discoveredDevices: [String: AppleHotspotInfo] = [:]
+    var onUpdate: (() -> Void)?
+    
+    override init() {
+        super.init()
+        setupSession()
+    }
+    
+    private func setupSession() {
+        guard let bundle = Bundle(path: "/System/Library/PrivateFrameworks/Sharing.framework") else { return }
+        bundle.load()
+        guard let sessionClass = NSClassFromString("SFRemoteHotspotSession") as? NSObject.Type else { return }
+        
+        let sess = sessionClass.init()
+        sess.setValue(self, forKey: "delegate")
+        self.session = sess
+        sess.perform(Selector(("startBrowsing")))
+    }
+    
+    @objc func session(_ session: AnyObject, updatedFoundDevices devices: [NSObject]) {
+        var newDevices: [String: AppleHotspotInfo] = [:]
+        for dev in devices {
+            let desc = dev.description
+            guard let name = dev.value(forKey: "deviceName") as? String, !name.isEmpty else { continue }
+            let signal = (dev.value(forKey: "signalStrength") as? Int) ?? 0
+            let battery = (dev.value(forKey: "batteryLife") as? Int) ?? 0
+            let netType = (dev.value(forKey: "networkType") as? Int) ?? 0
+            
+            let gen: String
+            if netType >= 8 || desc.contains("network type: 5G") {
+                gen = "5G"
+            } else {
+                gen = "4G"
+            }
+            
+            newDevices[name.lowercased()] = AppleHotspotInfo(
+                name: name,
+                generation: gen,
+                signalStrength: signal,
+                batteryLife: battery
+            )
+        }
+        
+        DispatchQueue.main.async {
+            self.discoveredDevices = newDevices
+            self.onUpdate?()
+        }
+    }
+    
+    func matchingDevice(for ssid: String) -> AppleHotspotInfo? {
+        let lower = ssid.lowercased()
+        if let direct = discoveredDevices[lower] {
+            return direct
+        }
+        let cleanSSID = lower.replacingOccurrences(of: "’", with: "'")
+        for (key, info) in discoveredDevices {
+            let cleanKey = key.replacingOccurrences(of: "’", with: "'")
+            if cleanKey == cleanSSID || cleanKey.contains(cleanSSID) || cleanSSID.contains(cleanKey) {
+                return info
+            }
+        }
+        if discoveredDevices.count == 1, let first = discoveredDevices.values.first {
+            return first
+        }
+        return nil
+    }
+}
+
 // MARK: - Network Monitor
 final class AirHUDMonitor: ObservableObject {
     @Published var isConnected: Bool = false
@@ -71,6 +152,7 @@ final class AirHUDMonitor: ObservableObject {
     @Published var cellularGeneration: String = "4G"
     @Published var signalBars: Int = 0
     @Published var latencyMs: Double = 0.0
+    @Published var batteryLife: Int = 0
     
     private var timer: Timer?
     private var latencyTimer: Timer?
@@ -86,6 +168,10 @@ final class AirHUDMonitor: ObservableObject {
     var onUpdate: (() -> Void)?
     
     func start() {
+        AppleInstantHotspotManager.shared.onUpdate = { [weak self] in
+            self?.poll()
+        }
+        
         poll()
         probeLatency()
         
@@ -215,6 +301,12 @@ final class AirHUDMonitor: ObservableObject {
             }
         }
         
+        // Check Apple Instant Hotspot (macOS Control Center source of truth)
+        let appleHotspot = AppleInstantHotspotManager.shared.matchingDevice(for: ssidString)
+        if appleHotspot != nil {
+            isHotspotNetwork = true
+        }
+        
         // Mode override from Menu Bar (Auto / Force Hotspot / Force Wi-Fi)
         let modeOverride = UserDefaults.standard.string(forKey: "AirHUD_modeOverride") ?? "auto"
         let hotspotDetected: Bool
@@ -235,8 +327,11 @@ final class AirHUDMonitor: ObservableObject {
             gen = "5G"
         } else if cellularOverride == "force4G" {
             gen = "4G"
+        } else if let apple = appleHotspot {
+            // Read DIRECTLY from macOS Control Center / Instant Hotspot
+            gen = apple.generation
         } else {
-            // Auto-detect based on dynamic cellular RTT latency & SSID hints
+            // Fallback for Android / non-Apple hotspots using dynamic latency
             let avgLatency = recentLatencies.isEmpty ? latencyMs : (recentLatencies.reduce(0, +) / Double(recentLatencies.count))
             
             if ssidLower.contains("5g") && !ssidLower.contains("4g") {
@@ -257,6 +352,9 @@ final class AirHUDMonitor: ObservableObject {
         let bars: Int
         if !connected || rssiVal == 0 || rssiVal < -100 {
             bars = 0
+        } else if let apple = appleHotspot, apple.signalStrength > 0 {
+            // Exact cellular reception tower bars from Apple Control Center
+            bars = min(4, max(1, apple.signalStrength))
         } else if rssiVal >= -60 {
             bars = 4
         } else if rssiVal >= -70 {
@@ -285,6 +383,7 @@ final class AirHUDMonitor: ObservableObject {
             self.transmitRate = txRate
             self.cellularGeneration = gen
             self.signalBars = bars
+            self.batteryLife = appleHotspot?.batteryLife ?? 0
             self.onUpdate?()
         }
     }
@@ -452,8 +551,8 @@ struct AirHUDView: View {
                         .transition(.opacity.combined(with: .scale(scale: 0.85)))
                     }
                     
-                    // Signal strength text in dBm and latency in ms
-                    Text(monitor.isConnected ? (monitor.isHotspot && monitor.latencyMs > 0 ? "\(Int(monitor.latencyMs))ms • \(monitor.rssi) dBm" : "\(monitor.rssi) dBm") : "-- dBm")
+                    // Signal strength text in dBm and phone battery life on hover
+                    Text(monitor.isConnected ? (monitor.isHotspot ? (monitor.batteryLife > 0 ? "\(monitor.batteryLife)% 🔋 • \(monitor.rssi) dBm" : (monitor.latencyMs > 0 ? "\(Int(monitor.latencyMs))ms • \(monitor.rssi) dBm" : "\(monitor.rssi) dBm")) : "\(monitor.rssi) dBm") : "-- dBm")
                         .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
                         .foregroundColor(monitor.isConnected ? Color.white.opacity(0.92) : Color.white.opacity(0.45))
                         .fixedSize()
