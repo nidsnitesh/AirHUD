@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import CoreWLAN
+import Network
 
 // MARK: - Pill Frame Preference Key
 struct PillFrameKey: PreferenceKey {
@@ -67,10 +68,15 @@ final class AirHUDMonitor: ObservableObject {
     @Published var ssid: String = "Detecting..."
     @Published var rssi: Int = 0
     @Published var transmitRate: Double = 0.0
-    @Published var cellularGeneration: String = "5G"
+    @Published var cellularGeneration: String = "4G"
     @Published var signalBars: Int = 0
+    @Published var latencyMs: Double = 0.0
     
     private var timer: Timer?
+    private var latencyTimer: Timer?
+    private var activeConnection: NWConnection?
+    private var recentLatencies: [Double] = []
+    
     private let client = CWWiFiClient.shared()
     private var lastKnownSSID: String?
     
@@ -81,14 +87,63 @@ final class AirHUDMonitor: ObservableObject {
     
     func start() {
         poll()
+        probeLatency()
+        
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.poll()
+        }
+        
+        latencyTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
+            self?.probeLatency()
         }
     }
     
     func stop() {
         timer?.invalidate()
         timer = nil
+        latencyTimer?.invalidate()
+        latencyTimer = nil
+        activeConnection?.cancel()
+        activeConnection = nil
+    }
+    
+    func probeLatency() {
+        guard client.interface()?.rssiValue() != 0 else { return }
+        
+        let host = NWEndpoint.Host("1.1.1.1")
+        let port = NWEndpoint.Port(integerLiteral: 443)
+        let conn = NWConnection(host: host, port: port, using: .tcp)
+        self.activeConnection = conn
+        
+        let startTime = DispatchTime.now()
+        
+        conn.stateUpdateHandler = { [weak self, weak conn] state in
+            switch state {
+            case .ready:
+                let endTime = DispatchTime.now()
+                let nano = endTime.uptimeNanoseconds - startTime.uptimeNanoseconds
+                let ms = Double(nano) / 1_000_000.0
+                conn?.cancel()
+                DispatchQueue.main.async {
+                    self?.handleLatencyMeasurement(ms)
+                }
+            case .failed, .cancelled:
+                conn?.cancel()
+            default:
+                break
+            }
+        }
+        
+        conn.start(queue: DispatchQueue.global(qos: .utility))
+    }
+    
+    private func handleLatencyMeasurement(_ ms: Double) {
+        self.latencyMs = ms
+        recentLatencies.append(ms)
+        if recentLatencies.count > 4 {
+            recentLatencies.removeFirst()
+        }
+        self.poll()
     }
     
     func poll() {
@@ -107,7 +162,6 @@ final class AirHUDMonitor: ObservableObject {
         
         let rssiVal = iface.rssiValue()
         let txRate = iface.transmitRate()
-        let phyMode = iface.activePHYMode()
         let channel = iface.wlanChannel()?.channelNumber
         
         var detectedSSID = iface.ssid()
@@ -172,14 +226,31 @@ final class AirHUDMonitor: ObservableObject {
             hotspotDetected = connected && isHotspotNetwork
         }
         
-        // Infer cellular generation when connected to a Hotspot
+        // Accurate Cellular 5G vs 4G Detection
+        let cellularOverride = UserDefaults.standard.string(forKey: "AirHUD_cellularOverride") ?? "auto"
         let gen: String
         if !connected {
             gen = "4G"
-        } else if txRate >= 80.0 || (phyMode == .mode11ax && txRate >= 50.0) {
+        } else if cellularOverride == "force5G" {
             gen = "5G"
-        } else {
+        } else if cellularOverride == "force4G" {
             gen = "4G"
+        } else {
+            // Auto-detect based on dynamic cellular RTT latency & SSID hints
+            let avgLatency = recentLatencies.isEmpty ? latencyMs : (recentLatencies.reduce(0, +) / Double(recentLatencies.count))
+            
+            if ssidLower.contains("5g") && !ssidLower.contains("4g") {
+                gen = (avgLatency > 80.0) ? "4G" : "5G"
+            } else if ssidLower.contains("4g") || ssidLower.contains("lte") {
+                gen = "4G"
+            } else {
+                // 5G latency is typically 15ms-45ms. 4G LTE is typically 55ms-120ms.
+                if avgLatency > 0.0 {
+                    gen = (avgLatency < 50.0) ? "5G" : "4G"
+                } else {
+                    gen = "4G"
+                }
+            }
         }
         
         // Map Wi-Fi / Hotspot signal strength to 4 ascending signal bars
@@ -279,50 +350,61 @@ struct AirHUDView: View {
                 }
                 
                 // Compact State: ONLY the Badge is shown (5G / 4G / Wi-Fi / Offline)
-                Group {
-                    if !monitor.isConnected {
-                        Text("Offline")
-                            .font(.system(size: 11, weight: .heavy, design: .rounded))
-                            .foregroundColor(Color.white.opacity(0.55))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2.5)
-                            .background(
-                                Capsule().fill(Color.white.opacity(0.1))
-                            )
-                            .overlay(
-                                Capsule().strokeBorder(Color.white.opacity(0.2), lineWidth: 1)
-                            )
-                    } else if monitor.isHotspot {
-                        Text(monitor.cellularGeneration)
-                            .font(.system(size: 11, weight: .heavy, design: .rounded))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(
-                                Capsule().fill(
-                                    is5G
-                                        ? Color(red: 0.16, green: 0.78, blue: 0.34) // Solid Green background for 5G
-                                        : Color(red: 0.92, green: 0.22, blue: 0.25)  // Solid Red background for 4G
+                // Clickable badge: easily toggle between 5G and 4G on click!
+                Button(action: {
+                    if monitor.isHotspot {
+                        let current = UserDefaults.standard.string(forKey: "AirHUD_cellularOverride") ?? "auto"
+                        let next = (current == "force4G" || monitor.cellularGeneration == "4G") ? "force5G" : "force4G"
+                        UserDefaults.standard.set(next, forKey: "AirHUD_cellularOverride")
+                        monitor.poll()
+                    }
+                }) {
+                    Group {
+                        if !monitor.isConnected {
+                            Text("Offline")
+                                .font(.system(size: 11, weight: .heavy, design: .rounded))
+                                .foregroundColor(Color.white.opacity(0.55))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2.5)
+                                .background(
+                                    Capsule().fill(Color.white.opacity(0.1))
                                 )
-                            )
-                            .shadow(
-                                color: (is5G ? Color.green : Color.red).opacity(0.35),
-                                radius: 4, x: 0, y: 1
-                            )
-                    } else {
-                        Text("Wi-Fi")
-                            .font(.system(size: 11, weight: .heavy, design: .rounded))
-                            .foregroundColor(Color(red: 0.25, green: 0.95, blue: 0.65))
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2.5)
-                            .background(
-                                Capsule().fill(Color.green.opacity(0.16))
-                            )
-                            .overlay(
-                                Capsule().strokeBorder(Color.green.opacity(0.35), lineWidth: 1)
-                            )
+                                .overlay(
+                                    Capsule().strokeBorder(Color.white.opacity(0.2), lineWidth: 1)
+                                )
+                        } else if monitor.isHotspot {
+                            Text(monitor.cellularGeneration)
+                                .font(.system(size: 11, weight: .heavy, design: .rounded))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(
+                                    Capsule().fill(
+                                        is5G
+                                            ? Color(red: 0.16, green: 0.78, blue: 0.34) // Solid Green background for 5G
+                                            : Color(red: 0.92, green: 0.22, blue: 0.25)  // Solid Red background for 4G
+                                    )
+                                )
+                                .shadow(
+                                    color: (is5G ? Color.green : Color.red).opacity(0.35),
+                                    radius: 4, x: 0, y: 1
+                                )
+                        } else {
+                            Text("Wi-Fi")
+                                .font(.system(size: 11, weight: .heavy, design: .rounded))
+                                .foregroundColor(Color(red: 0.25, green: 0.95, blue: 0.65))
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2.5)
+                                .background(
+                                    Capsule().fill(Color.green.opacity(0.16))
+                                )
+                                .overlay(
+                                    Capsule().strokeBorder(Color.green.opacity(0.35), lineWidth: 1)
+                                )
+                        }
                     }
                 }
+                .buttonStyle(.plain)
                 .fixedSize()
                 .layoutPriority(2)
                 
@@ -370,9 +452,9 @@ struct AirHUDView: View {
                         .transition(.opacity.combined(with: .scale(scale: 0.85)))
                     }
                     
-                    // Signal strength text in dBm
-                    Text(monitor.isConnected ? "\(monitor.rssi) dBm" : "-- dBm")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    // Signal strength text in dBm and latency in ms
+                    Text(monitor.isConnected ? (monitor.isHotspot && monitor.latencyMs > 0 ? "\(Int(monitor.latencyMs))ms • \(monitor.rssi) dBm" : "\(monitor.rssi) dBm") : "-- dBm")
+                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
                         .foregroundColor(monitor.isConnected ? Color.white.opacity(0.92) : Color.white.opacity(0.45))
                         .fixedSize()
                         .layoutPriority(1)
@@ -553,6 +635,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         modeParentItem.submenu = modeMenu
         menu.addItem(modeParentItem)
         
+        // Cellular Generation Selection Submenu
+        let cellMenu = NSMenu()
+        let currentCell = UserDefaults.standard.string(forKey: "AirHUD_cellularOverride") ?? "auto"
+        
+        let cellAutoItem = NSMenuItem(title: "Auto-Detect (< 50ms = 5G, ≥ 50ms = 4G)", action: #selector(setCellularAuto), keyEquivalent: "")
+        cellAutoItem.target = self
+        cellAutoItem.state = (currentCell == "auto") ? .on : .off
+        cellMenu.addItem(cellAutoItem)
+        
+        let cell5GItem = NSMenuItem(title: "Force 5G (Green)", action: #selector(setCellular5G), keyEquivalent: "")
+        cell5GItem.target = self
+        cell5GItem.state = (currentCell == "force5G") ? .on : .off
+        cellMenu.addItem(cell5GItem)
+        
+        let cell4GItem = NSMenuItem(title: "Force 4G (Red)", action: #selector(setCellular4G), keyEquivalent: "")
+        cell4GItem.target = self
+        cell4GItem.state = (currentCell == "force4G") ? .on : .off
+        cellMenu.addItem(cell4GItem)
+        
+        let cellParentItem = NSMenuItem(title: "Cellular Generation", action: nil, keyEquivalent: "")
+        cellParentItem.submenu = cellMenu
+        menu.addItem(cellParentItem)
+        
         menu.addItem(NSMenuItem.separator())
         
         let quitItem = NSMenuItem(
@@ -579,6 +684,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     @objc private func setModeForceWifi() {
         UserDefaults.standard.set("forceWifi", forKey: "AirHUD_modeOverride")
+        monitor.poll()
+        setupStatusBar()
+    }
+    
+    @objc private func setCellularAuto() {
+        UserDefaults.standard.set("auto", forKey: "AirHUD_cellularOverride")
+        monitor.poll()
+        setupStatusBar()
+    }
+    
+    @objc private func setCellular5G() {
+        UserDefaults.standard.set("force5G", forKey: "AirHUD_cellularOverride")
+        monitor.poll()
+        setupStatusBar()
+    }
+    
+    @objc private func setCellular4G() {
+        UserDefaults.standard.set("force4G", forKey: "AirHUD_cellularOverride")
         monitor.poll()
         setupStatusBar()
     }
