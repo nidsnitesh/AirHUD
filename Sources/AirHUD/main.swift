@@ -307,31 +307,18 @@ final class AirHUDMonitor: ObservableObject {
             isHotspotNetwork = true
         }
         
-        // Mode override from Menu Bar (Auto / Force Hotspot / Force Wi-Fi)
-        let modeOverride = UserDefaults.standard.string(forKey: "AirHUD_modeOverride") ?? "auto"
-        let hotspotDetected: Bool
-        if modeOverride == "forceHotspot" {
-            hotspotDetected = connected
-        } else if modeOverride == "forceWifi" {
-            hotspotDetected = false
-        } else {
-            hotspotDetected = connected && isHotspotNetwork
-        }
+        // 100% Autonomous Hotspot Detection
+        let hotspotDetected = connected && isHotspotNetwork
         
-        // Accurate Cellular 5G vs 4G Detection
-        let cellularOverride = UserDefaults.standard.string(forKey: "AirHUD_cellularOverride") ?? "auto"
+        // Accurate Cellular 5G vs 4G Auto-Detection (Control Center + Background Speed/Latency)
         let gen: String
         if !connected {
-            gen = "4G"
-        } else if cellularOverride == "force5G" {
-            gen = "5G"
-        } else if cellularOverride == "force4G" {
             gen = "4G"
         } else if let apple = appleHotspot {
             // Read DIRECTLY from macOS Control Center / Instant Hotspot
             gen = apple.generation
         } else {
-            // Fallback for Android / non-Apple hotspots using dynamic latency
+            // Fallback for Android / non-Apple hotspots using background latency & speed polling
             let avgLatency = recentLatencies.isEmpty ? latencyMs : (recentLatencies.reduce(0, +) / Double(recentLatencies.count))
             
             if ssidLower.contains("5g") && !ssidLower.contains("4g") {
@@ -449,61 +436,50 @@ struct AirHUDView: View {
                 }
                 
                 // Compact State: ONLY the Badge is shown (5G / 4G / Wi-Fi / Offline)
-                // Clickable badge: easily toggle between 5G and 4G on click!
-                Button(action: {
-                    if monitor.isHotspot {
-                        let current = UserDefaults.standard.string(forKey: "AirHUD_cellularOverride") ?? "auto"
-                        let next = (current == "force4G" || monitor.cellularGeneration == "4G") ? "force5G" : "force4G"
-                        UserDefaults.standard.set(next, forKey: "AirHUD_cellularOverride")
-                        monitor.poll()
-                    }
-                }) {
-                    Group {
-                        if !monitor.isConnected {
-                            Text("Offline")
-                                .font(.system(size: 11, weight: .heavy, design: .rounded))
-                                .foregroundColor(Color.white.opacity(0.55))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2.5)
-                                .background(
-                                    Capsule().fill(Color.white.opacity(0.1))
+                Group {
+                    if !monitor.isConnected {
+                        Text("Offline")
+                            .font(.system(size: 11, weight: .heavy, design: .rounded))
+                            .foregroundColor(Color.white.opacity(0.55))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2.5)
+                            .background(
+                                Capsule().fill(Color.white.opacity(0.1))
+                            )
+                            .overlay(
+                                Capsule().strokeBorder(Color.white.opacity(0.2), lineWidth: 1)
+                            )
+                    } else if monitor.isHotspot {
+                        Text(monitor.cellularGeneration)
+                            .font(.system(size: 11, weight: .heavy, design: .rounded))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(
+                                Capsule().fill(
+                                    is5G
+                                        ? Color(red: 0.16, green: 0.78, blue: 0.34) // Solid Green background for 5G
+                                        : Color(red: 0.92, green: 0.22, blue: 0.25)  // Solid Red background for 4G
                                 )
-                                .overlay(
-                                    Capsule().strokeBorder(Color.white.opacity(0.2), lineWidth: 1)
-                                )
-                        } else if monitor.isHotspot {
-                            Text(monitor.cellularGeneration)
-                                .font(.system(size: 11, weight: .heavy, design: .rounded))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 3)
-                                .background(
-                                    Capsule().fill(
-                                        is5G
-                                            ? Color(red: 0.16, green: 0.78, blue: 0.34) // Solid Green background for 5G
-                                            : Color(red: 0.92, green: 0.22, blue: 0.25)  // Solid Red background for 4G
-                                    )
-                                )
-                                .shadow(
-                                    color: (is5G ? Color.green : Color.red).opacity(0.35),
-                                    radius: 4, x: 0, y: 1
-                                )
-                        } else {
-                            Text("Wi-Fi")
-                                .font(.system(size: 11, weight: .heavy, design: .rounded))
-                                .foregroundColor(Color(red: 0.25, green: 0.95, blue: 0.65))
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2.5)
-                                .background(
-                                    Capsule().fill(Color.green.opacity(0.16))
-                                )
-                                .overlay(
-                                    Capsule().strokeBorder(Color.green.opacity(0.35), lineWidth: 1)
-                                )
-                        }
+                            )
+                            .shadow(
+                                color: (is5G ? Color.green : Color.red).opacity(0.35),
+                                radius: 4, x: 0, y: 1
+                            )
+                    } else {
+                        Text("Wi-Fi")
+                            .font(.system(size: 11, weight: .heavy, design: .rounded))
+                            .foregroundColor(Color(red: 0.25, green: 0.95, blue: 0.65))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2.5)
+                            .background(
+                                Capsule().fill(Color.green.opacity(0.16))
+                            )
+                            .overlay(
+                                Capsule().strokeBorder(Color.green.opacity(0.35), lineWidth: 1)
+                            )
                     }
                 }
-                .buttonStyle(.plain)
                 .fixedSize()
                 .layoutPriority(2)
                 
@@ -712,54 +688,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         
         menu.addItem(NSMenuItem.separator())
         
-        // Network Mode Selection Submenu
-        let modeMenu = NSMenu()
-        let currentMode = UserDefaults.standard.string(forKey: "AirHUD_modeOverride") ?? "auto"
-        
-        let autoItem = NSMenuItem(title: "Auto-Detect (Default)", action: #selector(setModeAuto), keyEquivalent: "")
-        autoItem.target = self
-        autoItem.state = (currentMode == "auto") ? .on : .off
-        modeMenu.addItem(autoItem)
-        
-        let forceHotspotItem = NSMenuItem(title: "Force Hotspot Mode (5G/4G)", action: #selector(setModeForceHotspot), keyEquivalent: "")
-        forceHotspotItem.target = self
-        forceHotspotItem.state = (currentMode == "forceHotspot") ? .on : .off
-        modeMenu.addItem(forceHotspotItem)
-        
-        let forceWifiItem = NSMenuItem(title: "Force Wi-Fi Mode", action: #selector(setModeForceWifi), keyEquivalent: "")
-        forceWifiItem.target = self
-        forceWifiItem.state = (currentMode == "forceWifi") ? .on : .off
-        modeMenu.addItem(forceWifiItem)
-        
-        let modeParentItem = NSMenuItem(title: "Network Mode", action: nil, keyEquivalent: "")
-        modeParentItem.submenu = modeMenu
-        menu.addItem(modeParentItem)
-        
-        // Cellular Generation Selection Submenu
-        let cellMenu = NSMenu()
-        let currentCell = UserDefaults.standard.string(forKey: "AirHUD_cellularOverride") ?? "auto"
-        
-        let cellAutoItem = NSMenuItem(title: "Auto-Detect (< 50ms = 5G, ≥ 50ms = 4G)", action: #selector(setCellularAuto), keyEquivalent: "")
-        cellAutoItem.target = self
-        cellAutoItem.state = (currentCell == "auto") ? .on : .off
-        cellMenu.addItem(cellAutoItem)
-        
-        let cell5GItem = NSMenuItem(title: "Force 5G (Green)", action: #selector(setCellular5G), keyEquivalent: "")
-        cell5GItem.target = self
-        cell5GItem.state = (currentCell == "force5G") ? .on : .off
-        cellMenu.addItem(cell5GItem)
-        
-        let cell4GItem = NSMenuItem(title: "Force 4G (Red)", action: #selector(setCellular4G), keyEquivalent: "")
-        cell4GItem.target = self
-        cell4GItem.state = (currentCell == "force4G") ? .on : .off
-        cellMenu.addItem(cell4GItem)
-        
-        let cellParentItem = NSMenuItem(title: "Cellular Generation", action: nil, keyEquivalent: "")
-        cellParentItem.submenu = cellMenu
-        menu.addItem(cellParentItem)
-        
-        menu.addItem(NSMenuItem.separator())
-        
         let quitItem = NSMenuItem(
             title: "Quit AirHUD",
             action: #selector(NSApplication.terminate(_:)),
@@ -768,42 +696,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
         
         statusItem.menu = menu
-    }
-    
-    @objc private func setModeAuto() {
-        UserDefaults.standard.set("auto", forKey: "AirHUD_modeOverride")
-        monitor.poll()
-        setupStatusBar()
-    }
-    
-    @objc private func setModeForceHotspot() {
-        UserDefaults.standard.set("forceHotspot", forKey: "AirHUD_modeOverride")
-        monitor.poll()
-        setupStatusBar()
-    }
-    
-    @objc private func setModeForceWifi() {
-        UserDefaults.standard.set("forceWifi", forKey: "AirHUD_modeOverride")
-        monitor.poll()
-        setupStatusBar()
-    }
-    
-    @objc private func setCellularAuto() {
-        UserDefaults.standard.set("auto", forKey: "AirHUD_cellularOverride")
-        monitor.poll()
-        setupStatusBar()
-    }
-    
-    @objc private func setCellular5G() {
-        UserDefaults.standard.set("force5G", forKey: "AirHUD_cellularOverride")
-        monitor.poll()
-        setupStatusBar()
-    }
-    
-    @objc private func setCellular4G() {
-        UserDefaults.standard.set("force4G", forKey: "AirHUD_cellularOverride")
-        monitor.poll()
-        setupStatusBar()
     }
     
     @objc private func toggleHUDVisibility() {
